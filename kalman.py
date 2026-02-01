@@ -4,21 +4,79 @@ import numpy as np
 class KalmanFilter:
     """
     Kalman filter operations for a single player.
-    
+
     State: z (intrinsic skills)
     Observation: y = C @ z + noise, where C = H @ B (H selects observed skills)
     """
-    
-    def __init__(self, n_skills, B):
+
+    def __init__(self, n_skills, B, P_pop=None):
         self.n_skills = n_skills
         self.B = B
         self._I = np.eye(n_skills)
+        self.P_pop = P_pop  # Population covariance for uncertainty capping
     
     def predict(self, z_prev, P_prev, Q):
-        """Prediction step (random walk model)."""
+        """Prediction step with asymptotic uncertainty cap at population variance."""
         z_pred = z_prev.copy()
-        P_pred = P_prev + Q
+
+        if self.P_pop is not None:
+            P_pred = self._asymptotic_predict_P(P_prev, Q)
+        else:
+            P_pred = P_prev + Q
+
         return z_pred, P_pred
+
+    def _asymptotic_predict_P(self, P_prev, Q, min_ratio=0.001):
+        """
+        Predict uncertainty with asymptotic approach to P_pop.
+
+        P approaches (1 - min_ratio) * P_pop but never exceeds it.
+        The rate of approach is driven by the process noise Q.
+
+        Parameters
+        ----------
+        P_prev : ndarray (n_skills, n_skills)
+            Previous covariance matrix
+        Q : ndarray (n_skills, n_skills)
+            Process noise covariance matrix
+        min_ratio : float
+            Minimum headroom as fraction of P_pop (default 0.1%)
+
+        Returns
+        -------
+        P_pred : ndarray (n_skills, n_skills)
+            Predicted covariance, capped at (1 - min_ratio) * P_pop
+        """
+        P_pop = self.P_pop
+
+        # Work in eigenbasis of P_pop for cleaner math
+        eigvals_pop, V = np.linalg.eigh(P_pop)
+
+        # Transform to P_pop eigenbasis
+        P_prev_basis = V.T @ P_prev @ V
+        Q_basis = V.T @ Q @ V
+
+        # For each direction, apply asymptotic update
+        p_diag = np.diag(P_prev_basis)
+        q_diag = np.diag(Q_basis)
+        pop_diag = eigvals_pop
+
+        # Headroom decays exponentially; Q drives the decay
+        headroom = pop_diag - p_diag
+        # Clamp headroom to be positive (in case P_prev > P_pop initially)
+        headroom = np.maximum(headroom, min_ratio * pop_diag)
+        decay_rate = q_diag / headroom
+        decay = np.exp(-decay_rate)
+
+        # New headroom, but maintain minimum gap
+        min_headroom = min_ratio * pop_diag
+        new_headroom = np.maximum(headroom * decay, min_headroom)
+
+        p_new_diag = pop_diag - new_headroom
+
+        # Reconstruct full matrix
+        P_pred = V @ np.diag(p_new_diag) @ V.T
+        return 0.5 * (P_pred + P_pred.T)  # Symmetrize
     
     def _update_core(self, z_pred, P_pred, y, obs_indices, R_diag):
         """
@@ -200,8 +258,12 @@ class KalmanFilter:
         P_smooth[-1] = P_filt[-1]
         
         for t in range(T - 2, -1, -1):
-            P_pred = P_filt[t] + Q_mat
-            
+            # Predict covariance with asymptotic cap if P_pop available
+            if self.P_pop is not None:
+                P_pred = self._asymptotic_predict_P(P_filt[t], Q_mat)
+            else:
+                P_pred = P_filt[t] + Q_mat
+
             # Smoother gain
             try:
                 J = np.linalg.solve(P_pred.T, P_filt[t].T).T

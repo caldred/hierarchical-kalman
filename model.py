@@ -123,6 +123,7 @@ class HierarchicalKalmanFilter:
         self.R = None
         self.mu_pop = None
         self.sigma_pop = None
+        self.P_pop = None  # Population covariance in intrinsic space (for uncertainty capping)
 
         # State tracking
         self.player_states = {}
@@ -277,7 +278,7 @@ class HierarchicalKalmanFilter:
         )
 
         z0, P0 = self._intrinsic_prior()
-        kf = KalmanFilter(self.n_skills, self.B)
+        kf = KalmanFilter(self.n_skills, self.B, P_pop=self.P_pop)
 
         rows = []
         for player_id, obs_seq in binned_data.items():
@@ -329,7 +330,7 @@ class HierarchicalKalmanFilter:
         )
 
         z0, P0 = self._intrinsic_prior()
-        kf = KalmanFilter(self.n_skills, self.B)
+        kf = KalmanFilter(self.n_skills, self.B, P_pop=self.P_pop)
 
         for player_id, obs_seq in binned_data.items():
             start_bin = new_start_bins.get(player_id, 0)
@@ -512,7 +513,7 @@ class HierarchicalKalmanFilter:
             z_smooth, P_smooth, P_cross, innovations, S, z_filt, P_filt
         """
         z0, P0 = self._intrinsic_prior()
-        kf = KalmanFilter(self.n_skills, self.B)
+        kf = KalmanFilter(self.n_skills, self.B, P_pop=self.P_pop)
 
         # Filter
         filter_results = Parallel(n_jobs=self.n_jobs, backend="loky")(
@@ -739,7 +740,7 @@ class HierarchicalKalmanFilter:
     def _store_final_states(self, binned_data, player_ids):
         """Run final filter pass and store terminal states."""
         z0, P0 = self._intrinsic_prior()
-        kf = KalmanFilter(self.n_skills, self.B)
+        kf = KalmanFilter(self.n_skills, self.B, P_pop=self.P_pop)
 
         final_results = Parallel(n_jobs=self.n_jobs, backend="loky")(
             delayed(_final_filter_single_player)(
@@ -768,6 +769,10 @@ class HierarchicalKalmanFilter:
         inv_B = np.linalg.solve(self.B, np.eye(self.n_skills))
         z0 = inv_B @ self.mu_pop
         P0 = inv_B @ np.diag(self.sigma_pop ** 2) @ inv_B.T
+
+        # Store P_pop for uncertainty capping (P should never exceed population variance)
+        self.P_pop = P0.copy()
+
         return z0, P0
 
     def _format_edge_weights(self):
@@ -803,6 +808,7 @@ class HierarchicalKalmanFilter:
             'R': self.R,
             'mu_pop': self.mu_pop,
             'sigma_pop': self.sigma_pop,
+            'P_pop': self.P_pop,
             'player_states': self.player_states,
             'origin_date': self.origin_date,
             'time_bins': self.time_bins,
@@ -823,6 +829,7 @@ class HierarchicalKalmanFilter:
         model.R = data['R']
         model.mu_pop = data['mu_pop']
         model.sigma_pop = data['sigma_pop']
+        model.P_pop = data.get('P_pop')  # May be None for older serialized models
         model.player_states = data['player_states']
         model.origin_date = data.get('origin_date')
         model.time_bins = data.get('time_bins')
